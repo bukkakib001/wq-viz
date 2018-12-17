@@ -1,0 +1,113 @@
+#!/usr/bin/env perl
+
+use strict; 
+
+$SIG{INT} = \&sigcatch;
+$SIG{TERM} = \&sigcatch;
+
+my %masters;
+my $fail = 0;
+my $week = 604800;
+my $tenMB = 10000000;
+my $i = 0;
+
+my @jsons = <*.json>;
+foreach my $j (@jsons) {
+    open(INPUT, $j);
+    $masters{$j} = 0;
+    close(INPUT);
+}
+
+while(1) {
+    my $start = time;
+    unlink("query.json");
+    my $t = time;
+    my $result = system("wget http://catalog.cse.nd.edu:9097/query.json 2> /dev/null");
+    if($result and $fail < 60) { 
+        print(STDERR "Could not query catalog server.\n");
+        sleep(60);
+        $fail++;
+        next;
+    }
+    elsif($result) {
+        print(STDERR "Could not query catalog server.\nExceeded maximum attempts at query. Please try again later.\nShutting down.\n");
+        exit(1);
+    }
+    $fail = 0;
+
+    open(INPUT, "query.json");
+    while(my $line = <INPUT>) {
+        next unless $line =~ m/.+\"type\":\"wq_master\".+/ and $line =~ m/.+\"project\":\"(?<project>[^\"]+)\".+/;
+        my $proj = $+{project};
+        chomp($line);
+        $line =~ s/,\z//;
+        my $file = "$proj.json";
+        my $size = -s $file;
+        $masters{$file} = $i;
+        if($size > $tenMB) {
+            my $diff = $size - $tenMB;
+            open(OUTPUT, $file);
+            open(OUTPUT2, ">>", "$file.tmp");
+            while(my $pline = <OUTPUT>) {
+                if($diff > 0) {
+                    my $psize = length($pline);
+                    $diff -= $psize;
+                    next;
+                }
+                print(OUTPUT2 $pline);
+            }
+            close(OUTPUT);
+            close(OUTPUT2);
+            rename("$file.tmp", $file);
+        }
+        open(OUTPUT, ">>", $file);
+        print(OUTPUT "$line,\n");
+        close(OUTPUT);
+    }
+    close(INPUT);
+
+    my $j = 0;
+    foreach my $m (sort { $masters{$b} <=> $masters{$a} } keys %masters) {
+        if($masters{$m} != $i) {
+            $j++;
+            if($j > 100) {
+                unlink($m);
+                undef($masters{$m});
+                $j--;
+            }
+        }
+    }
+
+    my @jsons = <*.json>;
+    open(USERS, ">>", "userlist.dat.tmp");
+    print(USERS "[\n");
+    $j = 1;
+    foreach my $j (@jsons) {
+        my @name = split(".json", $j);
+        if($j == scalar(@jsons)) {
+            print(USERS "{\"name\": \"$name[0]\"}\n");
+        }
+        else {
+            print(USERS "{\"name\": \"$name[0]\"},\n");
+        }
+        $j++;
+    }
+    print(USERS "]");
+    close(USERS);
+    rename("userlist.dat.tmp", "userlist.dat");
+    $i++;
+
+    my $end = time;
+    my $diff = $end - $start;
+    open(STATS, ">>", "runstats.dat");
+    print(STATS "$diff\n");
+    close(STATS);
+    sleep(60);
+}
+exit(0);
+
+sub sigcatch {
+    print(STDERR "\nCaught $! signal. Cleaning up.\n");
+    unlink("query.json");
+    exit(0);
+}
